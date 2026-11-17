@@ -1,7 +1,7 @@
 """Forecast launch-day Twitch viewers from kernel-weighted comparable launches.
 
-Hourly log-offset quantiles are weighted by the launch-hour-1 level, then
-smoothed over time; malformed case data falls back to the house forecast.
+Each hour's log-offset is a weighted median with a MAD spread, smoothed over
+time and priced as a normal; malformed case data falls back to the house forecast.
 """
 
 import json
@@ -14,9 +14,11 @@ LEVELS = (0.05, 0.25, 0.5, 0.75, 0.95)
 ZS = (-1.645, -0.674, 0.0, 0.674, 1.645)
 EARLY_TERMS = ("early access", "early-access", "premium")  # These launches started days earlier; hour 1 is a second day in.
 GLOBAL_TERMS = ("single global", "simultaneous", "global unlock", "single time", "10:00 utc", "10 am")  # One worldwide unlock puts hour 1 before the wave.
+ROLLING_TERMS = ("midnight", "rolling")  # A midnight-local launch still rises slowly after hour 1.
 BANDWIDTH = 1.1
 HOUR_DECAY = 0.75
-SPREAD = 0.7  # The filtered pool carries the spread, so extra widening is no longer wanted.
+SIGMA_SCALE = 0.55  # Normal fit on robust spread beats empirical tails wrecked by 85x-643x stubs.
+SIGMA_FLOOR = 0.15  # Never claim a tighter hour than this in log terms, even when the pool agrees.
 
 
 def parse_time(value):
@@ -75,9 +77,9 @@ def valid_case(data):
     return "levels" not in data or data["levels"] == list(LEVELS)
 
 
-def weighted_quantile(items, tau):
+def weighted_median(items):
     items.sort(key=lambda item: item[0])
-    threshold = tau * sum(weight for _, weight in items)
+    threshold = sum(weight for _, weight in items) / 2
     cumulative = 0.0
     for value, weight in items:
         cumulative += weight
@@ -101,7 +103,9 @@ def build_comparables(data, case_lv1):
         item = (values, weight)
         unfiltered.append(item)
         unlock = str(comparable.get("unlock", "")).lower()
-        if not any(term in unlock for term in EARLY_TERMS + GLOBAL_TERMS):
+        if (not any(term in unlock for term in EARLY_TERMS)
+                and (any(term in unlock for term in ROLLING_TERMS)
+                     or not any(term in unlock for term in GLOBAL_TERMS))):
             filtered.append(item)
     return filtered or unfiltered, len(filtered)
 
@@ -112,28 +116,33 @@ def model(data, p):
     if not usable:
         raise ValueError("no usable comparables")
 
-    offsets = []
+    centers = []
+    sigmas = []
     for index in range(1, 24):
-        levels = []
-        for tau in LEVELS:
-            samples = [(math.log(values[index] / values[0]), weight) for values, weight in usable]
-            levels.append(weighted_quantile(samples, tau))
-        offsets.append(levels)
+        samples = [(math.log(values[index] / values[0]), weight) for values, weight in usable]
+        center = weighted_median(list(samples))
+        spread = 1.4826 * weighted_median(
+            [(abs(value - center), weight) for value, weight in samples]
+        )
+        centers.append(center)
+        sigmas.append(max(spread, SIGMA_FLOOR))
 
-    smoothed = []
-    for hour_index in range(23):
-        row = []
-        for level_index in range(5):
-            weighted = [(offsets[j][level_index], HOUR_DECAY ** abs(j - hour_index))
-                        for j in range(max(0, hour_index - 2), min(23, hour_index + 3))]
-            weight_sum = sum(weight for _, weight in weighted)
-            row.append(sum(value * weight for value, weight in weighted) / weight_sum)
-        median = row[2]
-        smoothed.append([median + (offset - median) * SPREAD for offset in row])
+    def smooth(series):
+        return [
+            sum(series[j] * HOUR_DECAY ** abs(j - hour_index)
+                for j in range(max(0, hour_index - 2), min(23, hour_index + 3)))
+            / sum(HOUR_DECAY ** abs(j - hour_index)
+                  for j in range(max(0, hour_index - 2), min(23, hour_index + 3)))
+            for hour_index in range(23)
+        ]
 
+    centers = smooth(centers)
+    sigmas = smooth(sigmas)
     rows = []
-    for hour, offset_row in enumerate(smoothed, 2):
-        q = [min(1e9, max(0.01, js_round(float(p) * math.exp(offset)))) for offset in offset_row]
+    for hour_index, hour in enumerate(range(2, 25)):
+        q = [min(1e9, max(0.01, js_round(float(p) * math.exp(
+            centers[hour_index] + z * SIGMA_SCALE * sigmas[hour_index]
+        )))) for z in ZS]
         for i in range(1, 5):
             q[i] = max(q[i], q[i - 1])
         rows.append({"hour": hour, "q": q})
