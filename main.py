@@ -12,7 +12,10 @@ from pathlib import Path
 
 LEVELS = (0.05, 0.25, 0.5, 0.75, 0.95)
 ZS = (-1.645, -0.674, 0.0, 0.674, 1.645)
-SMOOTH = (0.36, 0.6, 1.0, 0.6, 0.36)
+MIN_OPEN_SHARE = 0.40  # Exclude pre-unlock stubs: Silksong's 164 -> 3000 by hour 9.
+BANDWIDTH = 0.8
+HOUR_DECAY = 0.75
+SPREAD = 1.2  # Comparable days are noisier than one launch; 1.2 corrects held-out under-dispersion.
 
 
 def parse_time(value):
@@ -82,9 +85,10 @@ def weighted_quantile(items, tau):
     return items[-1][0]
 
 
-def model(data, p):
-    case_lv1 = math.log(max(float(p), 1.0))
-    usable = []
+def build_comparables(data, case_lv1):
+    unfiltered = []
+    filtered = []
+    excluded_unlock_terms = ("early access", "early-access", "premium")
     for comparable in data["comparables"]:
         start = parse_time(comparable["day_start"])
         by_time = {parse_time(point["from"]): point["viewers"] for point in comparable["hourly"]}
@@ -93,8 +97,19 @@ def model(data, p):
             continue
         values = [float(value) for value in values]
         lv1 = math.log(max(values[0], 1.0))
-        weight = math.exp(-0.5 * ((lv1 - case_lv1) / 0.7) ** 2)
-        usable.append((values, weight))
+        weight = math.exp(-0.5 * ((lv1 - case_lv1) / BANDWIDTH) ** 2)
+        item = (values, weight)
+        unfiltered.append(item)
+        unlock = str(comparable.get("unlock", "")).lower()
+        if (values[0] >= MIN_OPEN_SHARE * max(values)
+                and not any(term in unlock for term in excluded_unlock_terms)):
+            filtered.append(item)
+    return filtered or unfiltered, len(filtered)
+
+
+def model(data, p):
+    case_lv1 = math.log(max(float(p), 1.0))
+    usable, _ = build_comparables(data, case_lv1)
     if not usable:
         raise ValueError("no usable comparables")
 
@@ -110,11 +125,12 @@ def model(data, p):
     for hour_index in range(23):
         row = []
         for level_index in range(5):
-            weighted = [(offsets[j][level_index], SMOOTH[j - hour_index + 2])
+            weighted = [(offsets[j][level_index], HOUR_DECAY ** abs(j - hour_index))
                         for j in range(max(0, hour_index - 2), min(23, hour_index + 3))]
             weight_sum = sum(weight for _, weight in weighted)
             row.append(sum(value * weight for value, weight in weighted) / weight_sum)
-        smoothed.append(row)
+        median = row[2]
+        smoothed.append([median + (offset - median) * SPREAD for offset in row])
 
     rows = []
     for hour, offset_row in enumerate(smoothed, 2):
