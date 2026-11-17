@@ -12,10 +12,11 @@ from pathlib import Path
 
 LEVELS = (0.05, 0.25, 0.5, 0.75, 0.95)
 ZS = (-1.645, -0.674, 0.0, 0.674, 1.645)
-MIN_OPEN_SHARE = 0.40  # Exclude pre-unlock stubs: Silksong's 164 -> 3000 by hour 9.
-BANDWIDTH = 0.8
+EARLY_TERMS = ("early access", "early-access", "premium")  # These launches started days earlier; hour 1 is a second day in.
+GLOBAL_TERMS = ("single global", "simultaneous", "global unlock", "single time", "10:00 utc", "10 am")  # One worldwide unlock puts hour 1 before the wave.
+BANDWIDTH = 1.1
 HOUR_DECAY = 0.75
-SPREAD = 1.2  # Comparable days are noisier than one launch; 1.2 corrects held-out under-dispersion.
+SPREAD = 0.7  # The filtered pool carries the spread, so extra widening is no longer wanted.
 
 
 def parse_time(value):
@@ -88,7 +89,6 @@ def weighted_quantile(items, tau):
 def build_comparables(data, case_lv1):
     unfiltered = []
     filtered = []
-    excluded_unlock_terms = ("early access", "early-access", "premium")
     for comparable in data["comparables"]:
         start = parse_time(comparable["day_start"])
         by_time = {parse_time(point["from"]): point["viewers"] for point in comparable["hourly"]}
@@ -101,8 +101,7 @@ def build_comparables(data, case_lv1):
         item = (values, weight)
         unfiltered.append(item)
         unlock = str(comparable.get("unlock", "")).lower()
-        if (values[0] >= MIN_OPEN_SHARE * max(values)
-                and not any(term in unlock for term in excluded_unlock_terms)):
+        if not any(term in unlock for term in EARLY_TERMS + GLOBAL_TERMS):
             filtered.append(item)
     return filtered or unfiltered, len(filtered)
 
