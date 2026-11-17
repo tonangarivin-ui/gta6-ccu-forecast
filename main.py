@@ -15,9 +15,10 @@ ZS = (-1.645, -0.674, 0.0, 0.674, 1.645)
 EARLY_TERMS = ("early access", "early-access", "premium")  # These launches started days earlier; hour 1 is a second day in.
 GLOBAL_TERMS = ("single global", "simultaneous", "global unlock", "single time", "10:00 utc", "10 am")  # One worldwide unlock puts hour 1 before the wave.
 ROLLING_TERMS = ("midnight", "rolling")  # A midnight-local launch still rises slowly after hour 1.
-BANDWIDTH = 1.1
+BANDWIDTH = 0.9
 HOUR_DECAY = 0.75
-SIGMA_SCALE = 0.55  # Normal fit on robust spread beats empirical tails wrecked by 85x-643x stubs.
+SIGMA_SCALE = 0.6  # Normal fit on robust spread beats empirical tails wrecked by 85x-643x stubs.
+LEVEL_SLOPE = 0.75  # How much the pool's growth depends on how big hour 1 already was, shrunk; 0 leaves every launch the same shape.
 SIGMA_FLOOR = 0.15  # Never claim a tighter hour than this in log terms, even when the pool agrees.
 
 
@@ -116,6 +117,9 @@ def model(data, p):
     if not usable:
         raise ValueError("no usable comparables")
 
+    levels = [math.log10(values[0]) for values, _ in usable]
+    lo, hi = min(levels), max(levels)
+    case_level = max(lo, min(hi, math.log10(max(float(p), 1.0))))  # Clamp: a launch bigger than every comparable keeps the biggest one's shape.
     centers = []
     sigmas = []
     for index in range(1, 24):
@@ -124,6 +128,15 @@ def model(data, p):
         spread = 1.4826 * weighted_median(
             [(abs(value - center), weight) for value, weight in samples]
         )
+        pairs = [(level, math.log(values[index] / values[0]))
+                 for (values, _), level in zip(usable, levels)]
+        mean_x = sum(level for level, _ in pairs) / len(pairs)
+        mean_y = sum(offset for _, offset in pairs) / len(pairs)
+        denominator = sum((level - mean_x) ** 2 for level, _ in pairs)
+        slope = (LEVEL_SLOPE * sum((level - mean_x) * (offset - mean_y)
+                                   for level, offset in pairs) / denominator
+                 if denominator else 0.0)
+        center = mean_y + slope * (case_level - mean_x)
         centers.append(center)
         sigmas.append(max(spread, SIGMA_FLOOR))
 
