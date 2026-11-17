@@ -34,6 +34,9 @@ MAKEFUN_INPUT_DIR=/input MAKEFUN_OUTPUT_DIR=out python3 main.py
 Reads `<id>.in` cases from the input directory, writes `<id>.out` for each. Deterministic: the
 same input always produces byte-identical output, in well under a second per case.
 
+Run `python3 selftest.py` to validate the four practice cases and both fallback paths; set
+`MAKEFUN_TEST_INPUT_DIR` to override the practice input directory (Python 3.13, standard library only).
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
